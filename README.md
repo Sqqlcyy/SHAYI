@@ -1,4 +1,3 @@
-```markdown
 # 🎛️ SHAYI: The Producer-Aligned Post-Production Engine for AI Music
 
 [![Paper](https://img.shields.io/badge/Paper-ArXiv-red.svg)](#) 
@@ -24,7 +23,6 @@ Whether it's a generated track from Suno or a real studio recording, SHAYI inges
 
 Instead of a black-box monolithic diffusion process, SHAYI operates on a strict **Analysis $\to$ Generation $\to$ Synthesis** pipeline:
 
-```mermaid
 graph TD
     classDef input fill:#2d3436,stroke:#81ecec,stroke-width:2px,color:#fff;
     classDef encoder fill:#0984e3,stroke:#74b9ff,stroke-width:2px,color:#fff;
@@ -54,7 +52,6 @@ graph TD
     
     S --> V[Vocoder & Mixer]:::synth
     V --> O[Final Edited Audio]:::input
-```
 
 ---
 
@@ -63,14 +60,12 @@ graph TD
 Experience surgical music editing without any instruction fine-tuning or paired editing datasets.
 
 ### 1. Installation
-```bash
 git clone https://github.com/YourOrg/SHAYI.git
 cd SHAYI
 conda create -n shayi python=3.12
 conda activate shayi
 pip install -r part_1/requirements.txt
 pip install -r part_2/requirements.txt
-```
 
 ### 2. Download Weights
 Download the pre-trained $AE^2$ and HiFRA-T checkpoints from [HuggingFace (Link TBA)](#) and place them in:
@@ -80,13 +75,11 @@ Download the pre-trained $AE^2$ and HiFRA-T checkpoints from [HuggingFace (Link 
 ### 3. Run FactorLock Editing
 Take any input audio latent, apply an energy knob to deterministically modify a specific factor, and keep the rest strictly locked.
 
-```bash
 # Example: Double the rhythm density (groove) of a track
 python run_inference.py --target rhythm --knob_scale 2.0
 
 # Example: Shift the global harmonic structure (e.g., Emaj -> Cmaj)
 python run_inference.py --target pitch --knob_scale 1.8
-```
 Generated audios will be saved in the `infer/` directory. 
 
 ---
@@ -97,15 +90,11 @@ We provide one-click scripts to reproduce the quantitative results (Decoupled Co
 
 **Table 1: Disentanglement Probe ($R^2$ Matrix)**
 Validates that our $AE^2$ manifold is physically orthogonal.
-```bash
 python run_table1_probe.py
-```
 
 **Table 2: FactorLock Objective Conservation (MSE)**
 Proves that editing one target factor (e.g., Rhythm) yields massive target variance with near-zero off-target leakage.
-```bash
 python run_table2_mse.py
-```
 
 ---
 
@@ -123,19 +112,16 @@ SHAYI V1 establishes the mathematical foundation for orthogonal generative manif
 
 If you find SHAYI useful for your research or startup, please consider citing our work:
 
-```bibtex
 @article{shayi2026,
   title={SHAYI: A Self-Supervised Hierarchical Analytic Yielding Instructor for Controllable and Editable Music Generation},
   author={Anonymous Authors},
   journal={arXiv preprint},
   year={2026}
 }
-```
 
 ## 🤝 Acknowledgments
 Special thanks to the open-source communities of `audiocraft` and `PESTO`. 
 
 ---
 *Built with ❤️ by a team of producers and researchers who believe AI should assist, not replace, human creativity.*
-```# SHAYI
 # SHAYI
