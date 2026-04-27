@@ -22,7 +22,7 @@ Whether it's a generated track from Suno or a real studio recording, SHAYI inges
 ## 🏗️ Architecture
 
 Instead of a black-box monolithic diffusion process, SHAYI operates on a strict **Analysis $\to$ Generation $\to$ Synthesis** pipeline:
-
+```mermaid
 graph TD
     classDef input fill:#2d3436,stroke:#81ecec,stroke-width:2px,color:#fff;
     classDef encoder fill:#0984e3,stroke:#74b9ff,stroke-width:2px,color:#fff;
@@ -52,7 +52,7 @@ graph TD
     
     S --> V[Vocoder & Mixer]:::synth
     V --> O[Final Edited Audio]:::input
-
+```
 ---
 
 ## 🚀 Quick Start: FactorLock Inference
