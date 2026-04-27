@@ -1,0 +1,189 @@
+seed: 0
+
+data:
+  train_list: data/mini_dataset/train.txt
+  val_list: data/mini_dataset/val.txt
+  roots:
+    - data/processed/musdb18hq
+  sample_rate: 44100
+  crop_seconds: 10.0
+  feat_hop: 512
+  latent_hop: 512
+  n_pitch_bins: 588
+  n_mels: 128
+  n_mfcc: 20
+  n_rhythm_channels: 8                       # 03b multi-channel rhythm (onset_strength + onset_map + 6 tempo bands)
+  rhythm_multi_feat_name: rhythm_multi_instru.npy
+  prefer_envelope_timbre: true  # v2: envelope aux on              # content encoder reads mel, so irrelevant
+  n_envelope_dim: 80
+  envelope_feat_name: envelope_instru.npy
+  pitch_feat_name: pitch_salience_instru_nondrum.npy
+  rhythm_feat_name: rhythm_instru.npy             # legacy 1-ch fallback (unused; multi-channel preferred)
+  timbre_feat_name: mfcc_instru.npy
+  spec_feat_name: mel_linear_instru.npy  # linear-mag mel (richer info than log-mel) — "主力" input to content encoder
+  mel_linear_feat_name: mel_linear_instru.npy
+  normalize_audio: true
+  augment: true
+
+model:
+  variant: A
+
+  # Feature input dims (must match dataset)
+  pitch_in_dim: 588
+  rhythm_in_dim: 8
+  mel_in_dim: 128
+
+  # Feature encoders
+  enc_hidden: 256
+  enc_n_layers_side: 3
+  enc_n_layers_main: 5
+  enc_kernel: 3
+
+  # Structured heads (shapes match Variant B → same L_ortho/L_AY plumbing)
+  K: 4
+  n_pitch_bins: 128
+  d_r: 64
+  d_t: 128
+  head_hidden: 256
+  pitch_head_use_toeplitz: true
+  pitch_conv_out_gain: 5.0
+
+  # Fusion → decoder input
+  pitch_embed_dim: 128
+  pitch_embed_hidden: 256
+  dec_in_dim: 256
+  fusion_hidden_dims: [512, 512]
+  film_gamma_init: 0.1
+  film_gamma_clamp: 0.5
+  content_residual: true                     # add Proj(z_content) to fused features
+
+  # v2: envelope FiLM into content encoder (input-side anti-leak on z_t)
+  use_envelope_aux: true
+  envelope_in_dim: 80
+  envelope_film_gamma_init: 0.5   # 5x stronger than v1 (was 0.1)
+
+  # v2: factor adversaries (output-side anti-leak via GRL)
+  adv_hidden: 256
+  adv_pitch_target_dim: 588
+  adv_rhythm_target_dim: 8
+  adv_envelope_target_dim: 80
+  use_adv_on_zt: true
+  adv_pitch_on_zt_lambd: 0.3
+  adv_rhythm_on_zt_lambd: 0.3
+  use_adv_on_zr: true
+  adv_pitch_on_zr_lambd: 0.3
+  adv_envelope_on_zr_lambd: 0.3
+  use_content_adv: true
+  content_adv_lambd: 0.5
+
+  # SEANet waveform decoder: ratios product = 512 → 86 fps latent → 44.1 kHz wav
+  dec_n_filters: 32
+  dec_n_residual_layers: 3
+  dec_ratios: [8, 8, 4, 2]
+  dec_norm: weight_norm
+  # BigVGAN-style periodic activation — noticeable quality lift on
+  # harmonic instrumental audio (Lee et al., 2023).
+  dec_activation: AliasFreeSnakeBeta
+  dec_activation_params: {alpha_init: 1.0, beta_init: 1.0}
+  # LSTM bottleneck inside decoder — helps long-range temporal
+  # coherence for polyphonic instrumental music.
+  dec_lstm: 2
+
+train:
+  batch_size: 1
+  num_workers: 2
+
+  lr: 3.0e-4
+  betas: [0.9, 0.99]
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  warmup_steps: 500
+  max_steps: 30000
+
+  w_recon: 1.0
+  w_codec_distill: 0.0
+  require_codec_distill: false
+  w_ortho: 0.1
+  ortho_form: cross_cov
+
+  # KL is a no-op (log_var=0, but keep w=0 to skip the compute).
+  w_kl: 0.0
+  kl_beta_p: 1.0
+  kl_beta_r: 1.0
+  kl_beta_t: 1.0
+
+  w_moe_t: 0.0
+  w_moe_r: 0.0
+  moe_k: 8
+
+  # Trunk L1 doesn't apply (no trunk in Variant A). Leave at 0.
+  w_trunk_l1: 0.0
+  trunk_l1_form: group_lasso
+
+  # no trunk/aux split 
+  aux_dropout_p: 0.0
+
+  # Pitch anchor warmup KL
+  w_pitch_anchor: 0.02
+  pitch_anchor_warmup: 1500
+  pitch_anchor_decay_end: 5000
+  pitch_anchor_tau: 0.5
+
+  # MR-STFT loss (44.1 kHz Stable Audio recipe)
+  fft_sizes:  [2048, 4096, 8192]
+  hop_sizes:  [256, 512, 1024]
+  win_lengths: [2048, 4096, 8192]
+  # High-resolution log-mel L2 — doubling n_mels over the default 128
+  # gives the generator a finer-grained target and empirically speeds up
+  # convergence of mel-conditioned neural vocoders.
+  n_mels: 256
+  w_logmel: 1.0
+  w_wav_l1: 1.0
+
+  leakage_probe_every: 200
+  mi_probe_every: 2000
+  mi_inner_steps: 200
+  mi_hidden: 256
+
+  use_adv: true
+  w_adv: 1.0
+  w_feat_match: 10.0
+
+  # Multi-scale STFT discriminator (UnivNet / Fre-GAN) — catches spectral
+  # artefacts time-domain MPD+MSD miss. Especially helps music.
+  use_mssd: true
+
+  # EMA of generator weights — swapped in during validation and saved to
+  # a separate "*_ema.pt" checkpoint. Standard HiFi-GAN / BigVGAN trick.
+  use_ema: true
+  ema_decay: 0.999
+  ema_warmup: 1000
+
+  log_every: 20
+  val_every: 500
+  ckpt_every: 500
+  media_every: 1000
+  out_dir: ./runs/stage1_variant_a_v2
+  keep_last: 20
+
+  wandb_project: shayi-stage1
+  wandb_run_name: stage1-A_v2-seed0
+  wandb_entity: null
+  wandb_mode: offline
+
+  tb_enabled: true
+  tb_flush_every: 20
+
+  device: cuda
+  amp: true
+
+# ==============================================================================
+# NOTE — longer training + more data:
+#   Variant A trains its SEANet decoder from scratch, so 15k steps on a
+#   mini-dataset will NOT reach usable audio quality. HiFi-GAN-class
+#   decoders typically converge in the 400k–1M step range on full MUSDB /
+#   Slakh-size corpora (~150h+). Treat the current max_steps + mini-dataset
+#   setting as a smoke test only. For the NeurIPS ablation numbers, bump
+#   max_steps to 400000+ and train on the full downloaded corpora
+#   (MUSDB18-HQ + Slakh2100-FLAC-Redux combined).
+# ==============================================================================

@@ -1,0 +1,21 @@
+# librosa.cqt imports numba; current numba releases reject NumPy >= 2.2.
+numpy<=2.1
+scipy
+tqdm
+soundfile
+matplotlib
+librosa
+scikit-learn
+musdb
+stempeg
+torch
+torchaudio
+pyyaml
+wandb
+tensorboard
+frechet-audio-distance
+streamlit
+descript-audio-codec
+transformers
+einops
+flashy>=0.0.1

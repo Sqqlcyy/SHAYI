@@ -1,0 +1,168 @@
+# Stage 1 training 
+
+seed: 0
+
+data:
+  train_list: data/mini_dataset/train.txt
+  val_list: data/mini_dataset/val.txt
+  roots:
+    - data/processed/musdb7s
+  sample_rate: 44100
+  crop_seconds: 10.0
+  feat_hop: 512
+  latent_hop: 512
+  n_pitch_bins: 588
+  n_mels: 128
+  n_mfcc: 20
+
+  # Multi-channel rhythm aux is important — single-channel onset is too
+  # thin; LOEV++ observation. Requires 03b_extract_rhythm_multi.py output.
+  n_rhythm_channels: 8
+  rhythm_multi_feat_name: rhythm_multi_instru.npy
+
+  # Timbre aux: CheapTrick envelope (not MFCC). The pitch-invariant
+  # envelope removes harmonic structure at the input side so z_t can't
+  # even see pitch. Requires 04b_extract_envelope.py output.
+  prefer_envelope_timbre: true
+  n_envelope_dim: 80
+  envelope_feat_name: envelope_instru.npy
+
+  pitch_feat_name: pitch_salience_instru_nondrum.npy
+  rhythm_feat_name: rhythm_instru.npy
+  timbre_feat_name: mfcc_instru.npy                  # only used if prefer_envelope_timbre=false
+  spec_feat_name: spec_instru.npy
+  mel_linear_feat_name: mel_linear_instru.npy
+  normalize_audio: true
+  augment: true
+
+model:
+  variant: B_CODEC
+
+  # Codec bridge (frozen DAC-44k)
+  codec_backend: dac
+  codec_model: dac_44khz
+  codec_sample_rate: 44100
+  codec_dim: 0
+  freeze_codec: true
+  in_channels: 1
+
+  # Smoke fallback (only used with codec_backend=seanet)
+  codec_ratios: [8, 8, 8]
+  codec_n_filters: 32
+  codec_n_residual_layers: 3
+  smoke_codec_dim: 256
+
+  # Aux input dims (MUST match dataset's n_pitch_bins / n_rhythm_channels / n_envelope_dim)
+  aux_pitch_dim: 588
+  aux_rhythm_dim: 8
+  aux_timbre_dim: 80
+  aux_zero_mask: []
+
+  # Trunks (LOEV++ style per-head bottleneck)
+  trunk_out_p: 256
+  trunk_out_r: 128
+  trunk_out_t: 256
+  trunk_hidden: 256
+  trunk_n_layers: 3
+  trunk_kernel: 3
+
+  # Heads
+  K: 4                     # polyphony channels in pitch head (ablate with 2 / 8)
+  n_pitch_bins: 128        # semitone-aligned grid for Toeplitz shift-eq.
+  d_r: 64
+  d_t: 128
+  head_hidden: 256
+  aux_film_gamma_init: 0.1
+  # F3 logit-rescale gain on PitchHead.conv_out. 5.0 is the "break the softmax
+  # symmetry trap" default. Set to 1.0 in the M-no-gain ablation cell.
+  pitch_conv_out_gain: 5.0
+
+  # FiLM decoder
+  film_fusion_hidden_dims: [512, 512, 1024]
+  pitch_embed_dim: 128
+  pitch_embed_hidden: 256
+  # Clamp γ via tanh in TimbreFiLMGen so |γ| ≤ film_gamma_clamp.
+  # Prevents the degenerate γ ≈ −1 regime that would let z_t smuggle
+  # pitch-like information through FiLM's feature inversion.
+  film_gamma_clamp: 0.5
+
+  # Anti-leak secondary defenses (mild, primary defense is architecture)
+  use_pitch_adversary: false         # enable in anti-leak ablation cell
+  pitch_adversary_lambd: 0.1
+  pitch_adversary_hidden: 256
+  z_t_noise_std: 0.0                 # enable in anti-leak ablation cell
+
+train:
+  batch_size: 2                       # 4090-24G fits 2×10s DAC-44k; bs=1 would null out leakage probe (needs B>=2)
+  num_workers: 2
+
+  lr: 3.0e-4
+  betas: [0.9, 0.99]
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  warmup_steps: 500
+  max_steps: 15000
+
+  w_recon: 1.0
+  w_codec_distill: 1.0
+  require_codec_distill: true
+  w_ortho: 0.1
+  ortho_form: cross_cov
+
+  # Per-factor KL not used in v2 (deterministic encoder).
+  w_kl: 0.0
+  kl_beta_p: 1.0
+  kl_beta_r: 1.0
+  kl_beta_t: 1.0
+
+  # MoE aux loss is redundant after trunk bottleneck; keep at 0 by default.
+  # The ablation cell train_variant_b_v2_film_with_moe.yaml sets w_moe_t>0.
+  w_moe_t: 0.0
+  w_moe_r: 0.0
+  moe_k: 8
+
+  # Trunk L1 sparsity on input-conv weights (interpretable + extra bottleneck).
+  # Use group LASSO (per-input-channel) — only group sparsity gives the
+  # "trunk reads a subset of DAC channels" bottleneck claim.
+  w_trunk_l1: 1.0e-4
+  trunk_l1_form: group_lasso
+
+  # Music-ControlNet aux dropout: per-sample per-head Bernoulli drop of the
+  # aux FiLM input. Forces the DAC-trunk path to carry real information
+  # (instead of the head just copy-pasting aux → z). 0.1 is safe default.
+  aux_dropout_p: 0.1
+
+  # Pitch anchor warmup KL (F2'): symmetry-breaking prior for z_p. Only active
+  # for the first 1500 steps at full strength, linearly decays to 0 by 5000.
+  # At convergence the weight is 0 so z_p is driven purely by reconstruction
+  # + ortho + L_AY (the paper's unsupervised disentanglement claim stays
+  # intact).
+  w_pitch_anchor: 0.02
+  pitch_anchor_warmup: 1500
+  pitch_anchor_decay_end: 5000
+  pitch_anchor_tau: 0.5
+
+  # MR-STFT loss config for 44.1 kHz (Stable Audio recipe)
+  fft_sizes:  [2048, 4096, 8192]
+  hop_sizes:  [256, 512, 1024]
+  win_lengths: [2048, 4096, 8192]
+  n_mels: 128
+  w_logmel: 0.5
+  w_wav_l1: 1.0
+
+  leakage_probe_every: 200
+
+  log_every: 20
+  val_every: 500
+  ckpt_every: 500
+  media_every: 1000
+  out_dir: ./runs/stage1_variant_b_v2_film
+  keep_last: 50
+
+  wandb_project: shayi-stage1
+  wandb_run_name: stage1-B_v2_film-seed0
+  wandb_entity: null
+  wandb_mode: offline
+
+  device: cuda
+  amp: true

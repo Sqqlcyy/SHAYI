@@ -1,0 +1,30 @@
+dataset:
+  name: musdb7s
+  raw_root: ./data/raw/musdb7s
+  out_root: ./data/processed/musdb7s
+
+audio:
+  target_sr: 44100    # 2026-04-10: mainline moved to DAC 44.1 kHz for high-fidelity music reconstruction.
+  mono: true
+  chunk_sec: 0         # 0 表示不切片；想切片就填 4 或 8
+
+stft:
+  n_fft: 4096          # ~93 ms at 44.1 kHz; stronger low-frequency resolution for music.
+  hop_length: 512      # matches DAC-style codec hop and keeps transform/fusion alignment simple.
+  n_mels: 128          # covers 0-22.05 kHz
+
+pitch:
+  fmin: C2        # pyin vocal f0 search range (1D, legacy f0.npy path only)
+  fmax: C7
+
+cqt:
+  # 2-D CQT pitch salience for Variant B's pitch adapter.
+  # 84 bins / octave × 7 octaves = 588 bins over C1..C8.
+  # This gives exactly 7 bins per semitone, matching feature-level T_p.
+  fmin: 32.7
+  bins_per_octave: 84
+  n_octaves: 7
+
+timbre:
+  n_mfcc: 20
+  # cluster_k: 20   # 7秒 excerpt 不建议聚类，后面大数据再开

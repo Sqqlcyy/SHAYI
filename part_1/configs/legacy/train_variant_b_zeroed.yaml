@@ -1,0 +1,92 @@
+# Stage 1 ablation — Variant B-Codec_zeroed (codec trunk + pitch aux zeroed)
+# Mainline config stays at ../train_variant_b.yaml. This file is only for the
+# B_salience vs B_zeroed adapter/aux contribution ablation.
+
+seed: 0
+
+data:
+  train_list: data/mini_dataset/train.txt
+  val_list: data/mini_dataset/val.txt
+  roots:
+    - data/processed/slakh
+    - data/processed/moisesdb
+    - data/processed/musdb7s
+  sample_rate: 44100
+  crop_seconds: 10.0
+  feat_hop: 512
+  latent_hop: 512
+  n_pitch_bins: 588
+  n_mels: 128
+  n_mfcc: 20
+  pitch_feat_name: pitch_salience_instru_nondrum.npy
+  rhythm_feat_name: rhythm_instru.npy
+  timbre_feat_name: mfcc_instru.npy
+  spec_feat_name: spec_instru.npy
+  mel_linear_feat_name: mel_linear_instru.npy
+  normalize_audio: true
+  augment: true
+
+model:
+  variant: B_CODEC
+  codec_backend: dac
+  codec_model: dac_44khz
+  codec_sample_rate: 44100
+  codec_dim: 0
+  freeze_codec: true
+  in_channels: 1
+  codec_ratios: [8, 8, 8]
+  codec_n_filters: 32
+  codec_n_residual_layers: 3
+  smoke_codec_dim: 256
+  aux_pitch_dim: 588
+  aux_rhythm_dim: 1
+  aux_timbre_dim: 20
+  adapter_out_dim: 64
+  adapter_type: concat
+  aux_zero_mask: [pitch]
+  pitch_latent_dim: 256
+  rhythm_latent_dim: 128
+  timbre_latent_dim: 256
+  fusion_hidden_dim: 512
+  use_vae: true
+
+train:
+  batch_size: 4
+  num_workers: 4
+
+  lr: 3.0e-4
+  betas: [0.9, 0.99]
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  warmup_steps: 500
+  max_steps: 15000
+
+  w_recon: 1.0
+  w_codec_distill: 1.0
+  w_ortho: 0.1
+  ortho_form: cross_cov
+  w_kl: 1.0e-4
+  w_moe_t: 1.0e-3
+  w_moe_r: 0.0
+  moe_k: 8
+
+  fft_sizes:  [2048, 4096, 8192]
+  hop_sizes:  [256, 512, 1024]
+  win_lengths: [2048, 4096, 8192]
+  n_mels: 128
+  w_logmel: 0.5
+
+  log_every: 20
+  val_every: 500
+  ckpt_every: 500
+  media_every: 1000
+  out_dir: ./runs/stage1_variant_b_codec_zeroed
+  keep_last: 50
+
+  wandb_project: shayi-stage1
+  wandb_run_name: stage1-B_codec_zeroed-dac44k-seed0
+  wandb_entity: null
+  wandb_mode: offline
+
+  device: cuda
+  amp: true

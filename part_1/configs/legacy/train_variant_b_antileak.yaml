@@ -1,0 +1,151 @@
+# Stage 1 training — Variant B-Codec *anti-leak* configuration.
+#
+# Thesis: the shared codec trunk `c` is the dominant timbre leak path for
+# Variant B, because DAC's latent encodes everything, and the timbre head
+# can freely borrow pitch/rhythm content via MFCC.  This config turns on
+# three independent defenses so they can be ablated one by one:
+#
+#   1. Envelope timbre aux (pitch-invariant) replaces MFCC.
+#   2. GRL pitch adversary on z_t, adversarially stripping pitch from
+#      the timbre latent.
+#   3. Tight timbre KL + z_t Gaussian noise bottleneck to reduce the
+#      bandwidth available for the leak.
+#
+# Leakage is measured online via the closed-form ridge R² probes logged
+# by Stage1Trainer every ``leakage_probe_every`` steps (see
+# ``losses/leakage.py``).
+#
+# This config is *additive on top of* ``train_variant_b.yaml``; it does
+# not replace the mainline.  Keep the original around for clean A/B.
+
+seed: 0
+
+data:
+  train_list: data/mini_dataset/train.txt
+  val_list: data/mini_dataset/val.txt
+  roots:
+    - data/processed/musdb7s
+  sample_rate: 44100
+  crop_seconds: 10.0
+  feat_hop: 512
+  latent_hop: 512
+  n_pitch_bins: 588
+  n_mels: 128
+  n_mfcc: 20
+
+  # Multi-channel rhythm aux (onset_env + onset_map + tempogram bands).
+  # Requires: python -m data.src_data_prep.03b_extract_rhythm_multi
+  n_rhythm_channels: 8
+  rhythm_multi_feat_name: rhythm_multi_instru.npy
+
+  # Pitch-invariant envelope timbre aux (cepstral liftering / CheapTrick).
+  # Requires: python -m data.src_data_prep.04b_extract_envelope
+  prefer_envelope_timbre: true
+  n_envelope_dim: 80
+  envelope_feat_name: envelope_instru.npy
+
+  pitch_feat_name: pitch_salience_instru_nondrum.npy
+  rhythm_feat_name: rhythm_instru.npy
+  timbre_feat_name: mfcc_instru.npy
+  spec_feat_name: spec_instru.npy
+  mel_linear_feat_name: mel_linear_instru.npy
+  normalize_audio: true
+  augment: true
+
+model:
+  variant: B_CODEC
+  codec_backend: dac
+  codec_model: dac_44khz
+  codec_sample_rate: 44100
+  codec_dim: 0
+  freeze_codec: true
+  in_channels: 1
+
+  codec_ratios: [8, 8, 8]
+  codec_n_filters: 32
+  codec_n_residual_layers: 3
+  smoke_codec_dim: 256
+
+  aux_pitch_dim: 588
+  aux_rhythm_dim: 8        # must match data.n_rhythm_channels
+  aux_timbre_dim: 80       # must match data.n_envelope_dim
+  adapter_out_dim: 64
+
+  # Per-head adapter: keep pitch/rhythm on concat, let timbre use FiLM
+  # so the adversary / bottleneck acts on a non-trivial modulation path.
+  adapter_type: per_head
+  adapter_type_p: concat
+  adapter_type_r: concat
+  adapter_type_t: film
+  adapter_film_gamma_init: 0.1
+
+  aux_zero_mask: []
+
+  pitch_latent_dim: 256
+  rhythm_latent_dim: 128
+  timbre_latent_dim: 256
+  fusion_hidden_dim: 512
+  use_vae: true
+
+  # Anti-leak knobs on the B_CODEC model itself
+  z_t_keep_time: true
+  z_t_noise_std: 0.1              # Gaussian noise bottleneck on z_t
+  head_hidden_dim: 256
+  use_pitch_adversary: true
+  pitch_adversary_lambd: 1.0
+  pitch_adversary_hidden: 256
+
+train:
+  batch_size: 1
+  num_workers: 2
+
+  lr: 3.0e-4
+  betas: [0.9, 0.99]
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  warmup_steps: 500
+  max_steps: 15000
+
+  w_recon: 1.0
+  w_codec_distill: 1.0
+  require_codec_distill: true
+  w_ortho: 0.1
+  ortho_form: cross_cov
+
+  # Per-factor KL β: penalise timbre bandwidth more than pitch/rhythm.
+  w_kl: 1.0e-4
+  kl_beta_p: 1.0
+  kl_beta_r: 1.0
+  kl_beta_t: 4.0
+
+  # GRL pitch adversary weight on the timbre latent.
+  w_adv_pitch_on_t: 0.2
+
+  w_moe_t: 1.0e-3
+  w_moe_r: 0.0
+  moe_k: 8
+
+  fft_sizes:  [2048, 4096, 8192]
+  hop_sizes:  [256, 512, 1024]
+  win_lengths: [2048, 4096, 8192]
+  n_mels: 128
+  w_logmel: 0.5
+  w_wav_l1: 1.0
+
+  # Log R² leakage probes every 200 steps.
+  leakage_probe_every: 200
+
+  log_every: 20
+  val_every: 500
+  ckpt_every: 500
+  media_every: 1000
+  out_dir: ./runs/stage1_variant_b_codec_antileak
+  keep_last: 50
+
+  wandb_project: shayi-stage1
+  wandb_run_name: stage1-B_codec-antileak-seed0
+  wandb_entity: null
+  wandb_mode: offline
+
+  device: cuda
+  amp: true

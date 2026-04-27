@@ -1,0 +1,203 @@
+# Stage 1 training — Variant A-Codec
+# Independent feature encoders (part1_old lineage) + frozen DAC decoder
+# + GRL content adversary (z_content must not predict pitch/rhythm/timbre).
+
+seed: 0
+
+data:
+  train_list: data/mini_dataset/train.txt
+  val_list: data/mini_dataset/val.txt
+  roots:
+    - data/processed/musdb18hq
+    - data/processed/slakh2100
+  sample_rate: 44100
+  crop_seconds: 10.0
+  feat_hop: 512
+  latent_hop: 512
+  n_pitch_bins: 588
+  n_mels: 128
+  n_mfcc: 20
+  # 8-ch rhythm_multi is the main rhythm stream (legacy 1-ch unused)
+  n_rhythm_channels: 8
+  rhythm_multi_feat_name: rhythm_multi_instru.npy
+  # aux_timbre <- envelope (pitch-invariant); drives the envelope FiLM in content enc + content adversary.
+  prefer_envelope_timbre: true
+  n_envelope_dim: 80
+  envelope_feat_name: envelope_instru.npy
+  pitch_feat_name: pitch_salience_instru_nondrum.npy
+  rhythm_feat_name: rhythm_instru.npy
+  timbre_feat_name: mfcc_instru.npy
+  spec_feat_name: spec_instru.npy                  # recon target = log-mel
+  mel_linear_feat_name: mel_linear_instru.npy      # content encoder input
+  normalize_audio: true
+  augment: true
+
+model:
+  variant: A_CODEC
+
+  # Frozen DAC bridge
+  codec_backend: dac
+  codec_model: dac_44khz
+  codec_bitrate: 8kbps
+  codec_sample_rate: 44100
+  codec_dim: 0                                     # 0 = auto
+  freeze_codec: true
+  in_channels: 1
+  codec_ratios: [8, 8, 8]
+  codec_n_filters: 32
+  codec_n_residual_layers: 3
+  smoke_codec_dim: 256
+
+  # Feature encoders
+  pitch_in_dim: 588
+  rhythm_in_dim: 8
+  mel_in_dim: 128
+  enc_hidden: 256
+  enc_n_layers_side: 3
+  enc_n_layers_main: 5
+  enc_kernel: 3
+
+  # Envelope FiLM into content encoder (anti-leak on z_t)
+  use_envelope_aux: true
+  envelope_in_dim: 80
+  envelope_film_gamma_init: 0.5  # v2: 5x stronger envelope signal
+
+  # Structured heads
+  K: 4
+  n_pitch_bins: 128
+  d_r: 64
+  d_t: 128
+  head_hidden: 256
+  pitch_head_use_toeplitz: true
+  pitch_conv_out_gain: 5.0
+
+  # Fusion → codec_dim=1024 (FiLM from z_t)
+  film_fusion_hidden_dims: [512, 512, 1024]
+  pitch_embed_dim: 128
+  pitch_embed_hidden: 256
+  film_gamma_init: 0.1
+  film_gamma_clamp: 0.5
+  film_zt_mode: film
+  content_residual: true
+
+  # Content adversary (GRL)
+  adv_hidden: 256
+  adv_lambd: 0.5
+  adv_pitch_target_dim: 588
+  adv_rhythm_target_dim: 8
+  adv_timbre_target_dim: 80
+
+  # v2: GRL adversaries on z_t (output-side anti-leak)
+  use_adv_on_zt: true
+  adv_pitch_on_zt_lambd: 0.3
+  adv_rhythm_on_zt_lambd: 0.3
+
+train:
+  # DAC encoder + decoder + our 4 encoders + fusion → tighter memory than B
+  batch_size: 1
+  num_workers: 2
+
+  lr: 3.0e-4
+  betas: [0.9, 0.99]
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  warmup_steps: 500
+  # Feature→codec regression is harder than Variant B's c→c identity-ish;
+  # plan for 20-30k steps to get close to B's reconstruction quality.
+  max_steps: 25000
+
+  w_recon: 1.0
+  # codec_distill is the main pressure — MSE(c_hat, c_target) in DAC latent space.
+  w_codec_distill: 1.0
+  require_codec_distill: true
+  w_ortho: 0.1
+  ortho_form: cross_cov
+
+  # Deterministic encoder → no KL
+  w_kl: 0.0
+  kl_beta_p: 1.0
+  kl_beta_r: 1.0
+  kl_beta_t: 1.0
+
+  w_moe_t: 0.0
+  w_moe_r: 0.0
+  moe_k: 8
+
+  # No trunk in Variant A-Codec (physically independent encoders) — not applicable
+  w_trunk_l1: 0.0
+  trunk_l1_form: group_lasso
+
+  # No aux/trunk split to drop
+  aux_dropout_p: 0.0
+
+  # Pitch anchor warmup KL (F2')
+  # v2: pitch anchor ALWAYS ON (no decay) — keeps z_p from collapsing.
+  w_pitch_anchor: 0.02
+  pitch_anchor_warmup: 30000   # > max_steps -> always full strength
+  pitch_anchor_decay_end: 30001
+  pitch_anchor_tau: 0.5
+
+  # Timbre anchor (symmetric, z_t → envelope pool)
+  # v2: timbre anchor ALWAYS ON, bumped 0.02 -> 0.05.
+  w_timbre_anchor: 0.05
+  timbre_anchor_warmup: 30000
+  timbre_anchor_decay_end: 30001
+
+  # GRL content adversary weight. 0.1 is conservative — push up if leakage
+  # metrics show z_content encoding pitch/rhythm/timbre.
+  w_content_adv: 0.1
+  # v2 z_t adversary weights
+  w_adv_pitch_on_zt: 0.1
+  w_adv_rhythm_on_zt: 0.1
+
+  # Recon loss (44.1 kHz Stable Audio recipe)
+  fft_sizes:  [2048, 4096, 8192]
+  hop_sizes:  [256, 512, 1024]
+  win_lengths: [2048, 4096, 8192]
+  n_mels: 128
+  w_logmel: 0.5
+  w_wav_l1: 1.0
+
+  leakage_probe_every: 200
+  mi_probe_every: 2000
+  mi_inner_steps: 200
+  mi_hidden: 256
+
+  # Adversarial wav loss is optional with DAC decoder (DAC already
+  # produces high-quality phase). Leave off initially — can turn on if FAD
+  # is still poor at end of training.
+  use_adv: false
+
+  log_every: 20
+  val_every: 500
+  ckpt_every: 1000
+  media_every: 1000
+  out_dir: ./runs/stage1_variant_a_codec_v2
+  keep_last: 20
+
+  wandb_project: shayi-stage1
+  wandb_run_name: stage1-A_codec_v2-seed0
+  wandb_entity: null
+  wandb_mode: offline
+
+  tb_enabled: true
+  tb_flush_every: 20
+
+  device: cuda
+  amp: true
+
+# ==============================================================================
+# NOTE — Variant A-Codec design:
+#   Physical encoder separation (unlike B's shared trunk) gives STRONGER
+#   disentanglement — pitch/rhythm encoders cannot see each other's inputs.
+#   Frozen DAC decoder handles waveform phase (unlike pure Variant A with
+#   from-scratch SEANet). Content residual channel absorbs what the 3
+#   factors can't encode (phase, ambience, transients), constrained by
+#   GRL adversary so it doesn't secretly hoard factor info.
+#
+#   Trade-off: feature -> c regression is a harder objective than B's
+#   c -> c near-identity, so convergence is slower. 25k steps on a single
+#   4090 is ~6-7 hours. If results plateau, try bumping w_content_adv
+#   first (stronger anti-leak on residual), then w_codec_distill (tighter
+#   codec match), then enable use_adv for perceptual polish.
+# ==============================================================================

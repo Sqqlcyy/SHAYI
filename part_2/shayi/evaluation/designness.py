@@ -1,0 +1,692 @@
+"""
+Designness: Structure-Aware Evaluation Metric for Music Generation.
+
+D_design(x) = w_C * C(x) + w_V * V(x) + w_R * R(x)
+
+Components:
+  C(x) — Contrast: segment-level feature variation between adjacent segments
+  V(x) — Variation: reuse-with-variation (similar segments differ in arrangement)
+  R(x) — Rhythmic Novelty: negative log-frequency of onset patterns
+
+Synthetic sanity check:
+  - Real music         → high Designness
+  - Shuffled segments  → low Contrast (random ordering, no musical flow)
+  - Repeated segment   → low Variation (no development)
+  - Random noise       → low everything
+
+Usage:
+  python -m part_2.shayi.evaluation.designness \
+      --audio_dir /path/to/audio \
+      --output results/designness.json
+
+  # Synthetic test:
+  python -m part_2.shayi.evaluation.designness \
+      --audio_dir /path/to/real_audio \
+      --synthetic_test \
+      --output results/designness_synthetic.json
+"""
+
+import argparse
+import json
+import os
+import warnings
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+
+try:
+    import librosa
+except ImportError:
+    warnings.warn("librosa not installed; some features will fail")
+    librosa = None
+
+try:
+    import torch
+except ImportError:
+    torch = None
+
+
+# =====================================================================
+#  Feature extraction per segment
+# =====================================================================
+
+def extract_segment_features(
+    y: np.ndarray,
+    sr: int = 44100,
+) -> np.ndarray:
+    """
+    Extract a feature vector summarizing one audio segment.
+    Returns: [n_features] numpy array.
+
+    Features:
+      - RMS energy (1)
+      - Spectral centroid mean (1)
+      - Spectral bandwidth mean (1)
+      - Onset density (1)
+      - MFCC means (13)
+      - Chroma means (12)
+    Total: 29 features
+    """
+    if len(y) < sr:
+        y = np.pad(y, (0, sr - len(y)))
+
+    features = []
+
+    # RMS energy
+    rms = np.sqrt(np.mean(y ** 2))
+    features.append(rms)
+
+    # Spectral centroid
+    cent = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
+    features.append(np.mean(cent))
+
+    # Spectral bandwidth
+    bw = librosa.feature.spectral_bandwidth(y=y, sr=sr)[0]
+    features.append(np.mean(bw))
+
+    # Onset density (onsets per second)
+    onsets = librosa.onset.onset_detect(y=y, sr=sr)
+    duration = len(y) / sr
+    features.append(len(onsets) / max(duration, 0.1))
+
+    # MFCCs
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    features.extend(np.mean(mfcc, axis=1).tolist())
+
+    # Chroma
+    chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+    features.extend(np.mean(chroma, axis=1).tolist())
+
+    return np.array(features, dtype=np.float32)
+
+
+# =====================================================================
+#  Segment audio
+# =====================================================================
+
+def segment_audio(
+    y: np.ndarray,
+    sr: int = 44100,
+    segment_sec: float = 4.0,
+) -> List[np.ndarray]:
+    """Split audio into fixed-length segments."""
+    seg_samples = int(segment_sec * sr)
+    segments = []
+    for start in range(0, len(y), seg_samples):
+        end = start + seg_samples
+        seg = y[start:end]
+        if len(seg) < seg_samples // 2:
+            break
+        segments.append(seg)
+    return segments
+
+
+# =====================================================================
+#  Designness components
+# =====================================================================
+
+def contrast_score(features: List[np.ndarray]) -> float:
+    """
+    C(x): Average L1 distance between adjacent segment feature vectors.
+    High → adjacent segments are different (good musical contrast).
+    """
+    if len(features) < 2:
+        return 0.0
+    diffs = []
+    for i in range(len(features) - 1):
+        d = np.sum(np.abs(features[i + 1] - features[i]))
+        diffs.append(d)
+    return float(np.mean(diffs))
+
+
+def variation_score(
+    features: List[np.ndarray],
+    similarity_threshold: float = 0.7,
+) -> float:
+    """
+    V(x): Among pairs of segments that are similar (cosine sim > threshold),
+    measure their average L1 difference.
+    High → similar sections still differ (reuse-with-variation).
+    """
+    if len(features) < 2:
+        return 0.0
+
+    # Normalize for cosine similarity
+    norms = [f / (np.linalg.norm(f) + 1e-8) for f in features]
+
+    similar_diffs = []
+    for i in range(len(features)):
+        for j in range(i + 1, len(features)):
+            cos_sim = float(np.dot(norms[i], norms[j]))
+            if cos_sim > similarity_threshold:
+                diff = np.sum(np.abs(features[i] - features[j]))
+                similar_diffs.append(diff)
+
+    if len(similar_diffs) == 0:
+        return 0.0
+    return float(np.mean(similar_diffs))
+
+
+def rhythmic_novelty_score(
+    y: np.ndarray,
+    sr: int = 44100,
+    segment_sec: float = 2.0,
+    grid_resolution: int = 16,
+) -> float:
+    """
+    R(x): Average self-information of onset patterns.
+    Quantize onsets to a grid, measure pattern entropy.
+    High → diverse rhythmic patterns (not repetitive).
+    """
+    segments = segment_audio(y, sr, segment_sec)
+    if len(segments) < 2:
+        return 0.0
+
+    patterns = []
+    for seg in segments:
+        # Onset envelope
+        onset_env = librosa.onset.onset_strength(y=seg, sr=sr)
+        # Quantize to grid
+        if len(onset_env) < grid_resolution:
+            onset_env = np.pad(onset_env, (0, grid_resolution - len(onset_env)))
+        # Resample to fixed grid
+        indices = np.linspace(0, len(onset_env) - 1, grid_resolution).astype(int)
+        grid = onset_env[indices]
+        # Binarize (above median = onset)
+        threshold = np.median(grid)
+        binary = tuple((grid > threshold).astype(int).tolist())
+        patterns.append(binary)
+
+    # Count pattern frequencies
+    from collections import Counter
+    counts = Counter(patterns)
+    total = len(patterns)
+
+    # Average -log(p) (self-information)
+    novelty = 0.0
+    for pat in patterns:
+        p = counts[pat] / total
+        novelty += -np.log(max(p, 1e-8))
+    novelty /= len(patterns)
+
+    return float(novelty)
+
+
+# =====================================================================
+#  Designness composite score
+# =====================================================================
+
+def designness(
+    y: np.ndarray,
+    sr: int = 44100,
+    segment_sec: float = 4.0,
+    w_C: float = 1.0,
+    w_V: float = 1.0,
+    w_R: float = 1.0,
+    similarity_threshold: float = 0.7,
+) -> Dict[str, float]:
+    """
+    Compute full Designness score for an audio signal.
+
+    Returns dict with:
+      - 'designness': composite score
+      - 'contrast': C(x)
+      - 'variation': V(x)
+      - 'rhythmic_novelty': R(x)
+      - 'n_segments': number of segments
+    """
+    segments = segment_audio(y, sr, segment_sec)
+
+    if len(segments) < 2:
+        return {
+            "designness": 0.0,
+            "contrast": 0.0,
+            "variation": 0.0,
+            "rhythmic_novelty": 0.0,
+            "n_segments": len(segments),
+        }
+
+    # Extract features per segment
+    features = [extract_segment_features(seg, sr) for seg in segments]
+
+    C = contrast_score(features)
+    V = variation_score(features, similarity_threshold)
+    R = rhythmic_novelty_score(y, sr)
+
+    D = w_C * C + w_V * V + w_R * R
+
+    return {
+        "designness": D,
+        "contrast": C,
+        "variation": V,
+        "rhythmic_novelty": R,
+        "n_segments": len(segments),
+    }
+
+
+# =====================================================================
+#  Synthetic degradation tests
+# =====================================================================
+
+def shuffle_segments(y: np.ndarray, sr: int = 44100, segment_sec: float = 4.0) -> np.ndarray:
+    """Randomly shuffle segment order."""
+    segments = segment_audio(y, sr, segment_sec)
+    rng = np.random.RandomState(42)
+    rng.shuffle(segments)
+    return np.concatenate(segments)
+
+
+def repeat_segment(y: np.ndarray, sr: int = 44100, segment_sec: float = 4.0) -> np.ndarray:
+    """Repeat the first segment to fill the original duration."""
+    seg_samples = int(segment_sec * sr)
+    first_seg = y[:seg_samples]
+    n_repeats = len(y) // seg_samples + 1
+    repeated = np.tile(first_seg, n_repeats)
+    return repeated[:len(y)]
+
+
+def random_noise(y: np.ndarray) -> np.ndarray:
+    """Generate random noise with same length and RMS as input."""
+    rms = np.sqrt(np.mean(y ** 2))
+    noise = np.random.RandomState(42).randn(len(y)).astype(np.float32)
+    noise = noise / (np.sqrt(np.mean(noise ** 2)) + 1e-8) * rms
+    return noise
+
+
+def run_synthetic_test(
+    y: np.ndarray,
+    sr: int = 44100,
+    segment_sec: float = 4.0,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Run Designness on four variants of the same audio:
+      1. original (real)
+      2. shuffled segments
+      3. repeated single segment
+      4. random noise (same RMS)
+
+    Expected results:
+      - FAD/CLAP cannot distinguish 1 vs 2 vs 3
+      - Designness CAN: 1 > 2 > 3 > 4
+    """
+    results = {}
+
+    # 1. Original
+    results["real"] = designness(y, sr, segment_sec)
+
+    # 2. Shuffled
+    y_shuf = shuffle_segments(y, sr, segment_sec)
+    results["shuffled"] = designness(y_shuf, sr, segment_sec)
+
+    # 3. Repeated
+    y_rep = repeat_segment(y, sr, segment_sec)
+    results["repeated"] = designness(y_rep, sr, segment_sec)
+
+    # 4. Random noise
+    y_noise = random_noise(y)
+    results["random"] = designness(y_noise, sr, segment_sec)
+
+    return results
+
+
+# =====================================================================
+#  Batch evaluation
+# =====================================================================
+
+def evaluate_directory(
+    audio_dir: str,
+    sr: int = 44100,
+    segment_sec: float = 4.0,
+    max_files: int = 100,
+    synthetic_test: bool = False,
+) -> Dict:
+    """Evaluate all audio files in a directory."""
+    audio_dir = Path(audio_dir)
+    files = sorted(
+        list(audio_dir.glob("*.wav")) +
+        list(audio_dir.glob("*.flac")) +
+        list(audio_dir.glob("*.mp3"))
+    )[:max_files]
+
+    print(f"Found {len(files)} audio files")
+
+    all_results = []
+    all_synthetic = [] if synthetic_test else None
+
+    for fpath in files:
+        try:
+            y, file_sr = librosa.load(str(fpath), sr=sr, mono=True)
+        except Exception as e:
+            print(f"skip {fpath}: {e}")
+            continue
+
+        if len(y) < sr * 8:  # skip files shorter than 8 seconds
+            continue
+
+        result = designness(y, sr, segment_sec)
+        result["file"] = str(fpath.name)
+        all_results.append(result)
+
+        if synthetic_test:
+            syn = run_synthetic_test(y, sr, segment_sec)
+            syn["file"] = str(fpath.name)
+            all_synthetic.append(syn)
+
+    # Aggregate
+    if all_results:
+        agg = {
+            "n_files": len(all_results),
+            "mean_designness": np.mean([r["designness"] for r in all_results]),
+            "mean_contrast": np.mean([r["contrast"] for r in all_results]),
+            "mean_variation": np.mean([r["variation"] for r in all_results]),
+            "mean_rhythmic_novelty": np.mean([r["rhythmic_novelty"] for r in all_results]),
+            "std_designness": np.std([r["designness"] for r in all_results]),
+        }
+    else:
+        agg = {"n_files": 0}
+
+    output = {
+        "aggregate": agg,
+        "per_file": all_results,
+    }
+
+    if synthetic_test and all_synthetic:
+        # Aggregate synthetic results
+        syn_agg = {}
+        for variant in ("real", "shuffled", "repeated", "random"):
+            scores = [s[variant]["designness"] for s in all_synthetic]
+            syn_agg[variant] = {
+                "mean": float(np.mean(scores)),
+                "std": float(np.std(scores)),
+            }
+        output["synthetic_test"] = {
+            "aggregate": syn_agg,
+            "per_file": all_synthetic,
+        }
+
+        # Print summary table
+        print("\n" + "=" * 60)
+        print("DESIGNNESS SYNTHETIC TEST RESULTS")
+        print("=" * 60)
+        print(f"{'Variant':<15} {'Mean':>10} {'Std':>10}")
+        print("-" * 35)
+        for variant in ("real", "shuffled", "repeated", "random"):
+            m = syn_agg[variant]["mean"]
+            s = syn_agg[variant]["std"]
+            print(f"{variant:<15} {m:>10.4f} {s:>10.4f}")
+        print("=" * 60)
+        print("Expected: real > shuffled > repeated > random")
+        print()
+
+    return output
+
+
+# =====================================================================
+#  Evaluate from pre-extracted Slakh npy features (no librosa needed)
+# =====================================================================
+
+def designness_from_npy(
+    track_dir: str,
+    segment_frames: int = 344,  # ~4 sec at 86 fps
+    w_C: float = 1.0,
+    w_V: float = 1.0,
+    w_R: float = 1.0,
+) -> Dict[str, float]:
+    """
+    Compute Designness directly from pre-extracted npy features.
+    No librosa needed — works with SHAYI's existing feature pipeline.
+
+    Uses:
+      - mel_linear_instru.npy for energy/spectral features
+      - rhythm_multi_instru.npy for onset patterns
+      - pitch_salience_instru_nondrum.npy for pitch features
+    """
+    track_dir = Path(track_dir)
+
+    mel = np.load(str(track_dir / "mel_linear_instru.npy")).astype(np.float32)
+    rhythm = np.load(str(track_dir / "rhythm_multi_instru.npy")).astype(np.float32)
+    pitch = np.load(str(track_dir / "pitch_salience_instru_nondrum.npy")).astype(np.float32)
+
+    # mel: [n_mels, T], rhythm: [n_ch, T], pitch: [n_bins, T]
+    T = min(mel.shape[-1], rhythm.shape[-1], pitch.shape[-1])
+    mel = mel[..., :T]
+    rhythm = rhythm[..., :T]
+    pitch = pitch[..., :T]
+
+    # Segment
+    n_segments = T // segment_frames
+    if n_segments < 2:
+        return {"designness": 0.0, "contrast": 0.0, "variation": 0.0,
+                "rhythmic_novelty": 0.0, "n_segments": n_segments}
+
+    # Per-segment features: [energy, centroid_approx, onset_density, pitch_density]
+    features = []
+    onset_patterns = []
+
+    for i in range(n_segments):
+        s = i * segment_frames
+        e = s + segment_frames
+
+        mel_seg = mel[:, s:e]
+        rhythm_seg = rhythm[:, s:e]
+        pitch_seg = pitch[:, s:e]
+
+        # Energy: mean of mel
+        energy = np.mean(mel_seg)
+
+        # Spectral centroid proxy: weighted mean of mel bin index
+        mel_sum = np.sum(mel_seg, axis=1) + 1e-8
+        bins = np.arange(mel_seg.shape[0], dtype=np.float32)
+        centroid = np.sum(bins * mel_sum) / np.sum(mel_sum)
+
+        # Onset density: mean of first rhythm channel (onset strength)
+        onset_density = np.mean(rhythm_seg[0]) if rhythm_seg.shape[0] > 0 else 0.0
+
+        # Pitch density: fraction of pitch bins above threshold
+        pitch_density = np.mean(pitch_seg > 0.1)
+
+        # Full mel mean as feature vector for cosine similarity
+        mel_mean = np.mean(mel_seg, axis=1)
+
+        feat = np.concatenate([
+            [energy, centroid, onset_density, pitch_density],
+            mel_mean,
+        ])
+        features.append(feat)
+
+        # Onset pattern for novelty
+        onset_grid = rhythm_seg[0] if rhythm_seg.shape[0] > 0 else np.zeros(segment_frames)
+        # Quantize to 16-step grid
+        grid_16 = np.interp(
+            np.linspace(0, len(onset_grid) - 1, 16),
+            np.arange(len(onset_grid)),
+            onset_grid,
+        )
+        binary = tuple((grid_16 > np.median(grid_16)).astype(int).tolist())
+        onset_patterns.append(binary)
+
+    # C: Contrast
+    C = contrast_score(features)
+
+    # V: Variation
+    V = variation_score(features, similarity_threshold=0.7)
+
+    # R: Rhythmic Novelty
+    from collections import Counter
+    counts = Counter(onset_patterns)
+    total = len(onset_patterns)
+    R = 0.0
+    for pat in onset_patterns:
+        p = counts[pat] / total
+        R += -np.log(max(p, 1e-8))
+    R /= total
+
+    D = w_C * C + w_V * V + w_R * R
+
+    return {
+        "designness": float(D),
+        "contrast": float(C),
+        "variation": float(V),
+        "rhythmic_novelty": float(R),
+        "n_segments": n_segments,
+    }
+
+
+def synthetic_test_from_npy(track_dir: str, segment_frames: int = 344) -> Dict:
+    """
+    Synthetic test using npy features.
+    Shuffles/repeats at the feature level (no audio needed).
+    """
+    track_dir = Path(track_dir)
+    mel = np.load(str(track_dir / "mel_linear_instru.npy")).astype(np.float32)
+    rhythm = np.load(str(track_dir / "rhythm_multi_instru.npy")).astype(np.float32)
+    pitch = np.load(str(track_dir / "pitch_salience_instru_nondrum.npy")).astype(np.float32)
+
+    T = min(mel.shape[-1], rhythm.shape[-1], pitch.shape[-1])
+    n_seg = T // segment_frames
+    if n_seg < 2:
+        return {}
+
+    # Real
+    real = designness_from_npy(str(track_dir), segment_frames)
+
+    # Shuffled: permute segments in all features
+    rng = np.random.RandomState(42)
+    perm = rng.permutation(n_seg)
+
+    tmp_dir = Path("/tmp/designness_synthetic")
+    tmp_dir.mkdir(exist_ok=True)
+
+    def _shuffle_npy(arr, perm, seg_len):
+        T = len(perm) * seg_len
+        arr = arr[..., :T]
+        segments = [arr[..., i * seg_len:(i + 1) * seg_len] for i in range(len(perm))]
+        shuffled = [segments[p] for p in perm]
+        return np.concatenate(shuffled, axis=-1)
+
+    def _repeat_npy(arr, seg_len, n_seg):
+        first = arr[..., :seg_len]
+        return np.tile(first, n_seg)[..., :n_seg * seg_len]
+
+    def _random_npy(arr):
+        rng = np.random.RandomState(42)
+        return rng.randn(*arr.shape).astype(np.float32) * np.std(arr)
+
+    results = {"real": real}
+
+    # Shuffled
+    for name, feat, fname in [
+        ("mel", mel, "mel_linear_instru.npy"),
+        ("rhythm", rhythm, "rhythm_multi_instru.npy"),
+        ("pitch", pitch, "pitch_salience_instru_nondrum.npy"),
+    ]:
+        np.save(str(tmp_dir / fname), _shuffle_npy(feat, perm, segment_frames))
+    results["shuffled"] = designness_from_npy(str(tmp_dir), segment_frames)
+
+    # Repeated
+    for name, feat, fname in [
+        ("mel", mel, "mel_linear_instru.npy"),
+        ("rhythm", rhythm, "rhythm_multi_instru.npy"),
+        ("pitch", pitch, "pitch_salience_instru_nondrum.npy"),
+    ]:
+        np.save(str(tmp_dir / fname), _repeat_npy(feat, segment_frames, n_seg))
+    results["repeated"] = designness_from_npy(str(tmp_dir), segment_frames)
+
+    # Random
+    for name, feat, fname in [
+        ("mel", mel, "mel_linear_instru.npy"),
+        ("rhythm", rhythm, "rhythm_multi_instru.npy"),
+        ("pitch", pitch, "pitch_salience_instru_nondrum.npy"),
+    ]:
+        np.save(str(tmp_dir / fname), _random_npy(feat))
+    results["random"] = designness_from_npy(str(tmp_dir), segment_frames)
+
+    return results
+
+
+# =====================================================================
+#  CLI
+# =====================================================================
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--audio_dir", type=str, default=None,
+                    help="Directory of audio files (wav/flac/mp3)")
+    ap.add_argument("--npy_dir", type=str, default=None,
+                    help="Single track dir with pre-extracted npy features")
+    ap.add_argument("--npy_list", type=str, default=None,
+                    help="Text file listing track dirs for batch npy evaluation")
+    ap.add_argument("--synthetic_test", action="store_true")
+    ap.add_argument("--output", type=str, default="designness_results.json")
+    ap.add_argument("--max_files", type=int, default=100)
+    ap.add_argument("--sr", type=int, default=44100)
+    args = ap.parse_args()
+
+    if args.npy_list:
+        # Batch npy evaluation
+        with open(args.npy_list) as f:
+            tracks = [l.strip() for l in f if l.strip()]
+
+        all_results = []
+        all_synthetic = []
+        for track in tracks[:args.max_files]:
+            if not Path(track).exists():
+                continue
+            r = designness_from_npy(track)
+            r["track"] = track
+            all_results.append(r)
+
+            if args.synthetic_test:
+                s = synthetic_test_from_npy(track)
+                s["track"] = track
+                all_synthetic.append(s)
+
+        output = {
+            "aggregate": {
+                "n_tracks": len(all_results),
+                "mean_designness": float(np.mean([r["designness"] for r in all_results])) if all_results else 0,
+                "std_designness": float(np.std([r["designness"] for r in all_results])) if all_results else 0,
+            },
+            "per_track": all_results,
+        }
+
+        if args.synthetic_test and all_synthetic:
+            syn_agg = {}
+            for variant in ("real", "shuffled", "repeated", "random"):
+                scores = [s[variant]["designness"] for s in all_synthetic if variant in s]
+                if scores:
+                    syn_agg[variant] = {"mean": float(np.mean(scores)), "std": float(np.std(scores))}
+            output["synthetic_test"] = syn_agg
+
+            print("\n" + "=" * 60)
+            print("DESIGNNESS SYNTHETIC TEST (from npy)")
+            print("=" * 60)
+            for v in ("real", "shuffled", "repeated", "random"):
+                if v in syn_agg:
+                    print(f"  {v:<12} mean={syn_agg[v]['mean']:.4f}  std={syn_agg[v]['std']:.4f}")
+            print("Expected: real > shuffled > repeated > random\n")
+
+    elif args.npy_dir:
+        if args.synthetic_test:
+            output = synthetic_test_from_npy(args.npy_dir)
+        else:
+            output = designness_from_npy(args.npy_dir)
+
+    elif args.audio_dir:
+        output = evaluate_directory(
+            args.audio_dir, sr=args.sr,
+            max_files=args.max_files,
+            synthetic_test=args.synthetic_test,
+        )
+    else:
+        print("Provide --audio_dir, --npy_dir, or --npy_list")
+        return
+
+    with open(args.output, "w") as f:
+        json.dump(output, f, indent=2, default=str)
+    print(f"Saved to {args.output}")
+
+
+if __name__ == "__main__":
+    main()

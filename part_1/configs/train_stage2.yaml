@@ -1,0 +1,138 @@
+
+seed: 0
+
+data:
+  train_list: data/mini_dataset/train.txt
+  val_list: data/mini_dataset/val.txt
+  roots:
+    - data/processed/slakh
+    - data/processed/moisesdb
+    - data/processed/musdb7s
+  sample_rate: 44100
+  crop_seconds: 10.0
+  feat_hop: 512
+  latent_hop: 512
+  n_pitch_bins: 588
+  n_mels: 128
+  n_mfcc: 20
+  pitch_feat_name: pitch_salience_instru_nondrum.npy
+  rhythm_feat_name: rhythm_instru.npy
+  timbre_feat_name: mfcc_instru.npy
+  spec_feat_name: spec_instru.npy
+  mel_linear_feat_name: mel_linear_instru.npy
+  normalize_audio: true
+  augment: false          
+
+model:
+  variant: B_CODEC
+  codec_backend: dac
+  codec_model: dac_44khz
+  codec_sample_rate: 44100
+  codec_dim: 0
+  freeze_codec: true
+  in_channels: 1
+  codec_ratios: [8, 8, 8]
+  codec_n_filters: 32
+  codec_n_residual_layers: 3
+  smoke_codec_dim: 256
+  aux_pitch_dim: 588
+  aux_rhythm_dim: 1
+  aux_timbre_dim: 20
+  adapter_out_dim: 64
+  adapter_type: concat
+  aux_zero_mask: []
+  pitch_latent_dim: 256
+  rhythm_latent_dim: 128
+  timbre_latent_dim: 256
+  fusion_hidden_dim: 512
+  use_vae: true
+
+ay:
+
+  transform_backend: feature
+  aux_sync_policy: closed_form
+  feature_transform_ops:
+    - pitch_shift        
+    - pitch_vibrato     
+    - rhythm_stretch
+    - rhythm_shift
+    - timbre_high_cut
+    - timbre_eq_tilt
+    - timbre_formant
+  pitch_min_st: -4.0
+  pitch_max_st: 4.0
+  pitch_bins_per_semitone: 7
+  vibrato_min_amount: 0.5
+  vibrato_max_amount: 2.0
+  vibrato_lfo_hz: 5.0
+  rhythm_min_scale: 0.9
+  rhythm_max_scale: 1.1111
+  rhythm_shift_min_steps: -16
+  rhythm_shift_max_steps: 16
+  timbre_min_tilt_db: -6.0
+  timbre_max_tilt_db: 6.0
+  timbre_high_cut_min_hz: 3000.0
+  timbre_high_cut_max_hz: 12000.0
+  timbre_formant_min_scale: 0.85
+  timbre_formant_max_scale: 1.15
+  mel_fmin_hz: 0.0
+  mel_fmax_hz: 22050.0
+  target_change_margin: 0.03
+  w_equiv: 1.0
+  w_inv: 1.0
+  w_comm: 0.5
+  include_rhythm_equivariance: true
+  include_commutativity: true
+
+train:
+  batch_size: 4             # halved vs Stage 1 — each step does ~7 encoder forwards
+  num_workers: 4
+
+  # Optimization — lower LR, shorter warmup for finetuning
+  lr: 1.5e-4
+  betas: [0.9, 0.99]
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  warmup_steps: 500
+  max_steps: 30000
+
+  # Stage 1 losses are still active (needed for recon stability)
+  w_recon: 1.0
+  w_codec_distill: 1.0
+  w_ortho: 0.1
+  ortho_form: cross_cov
+  w_kl: 1.0e-4
+  w_moe_t: 1.0e-3
+  w_moe_r: 0.0
+  moe_k: 8
+  fft_sizes:  [2048, 4096, 8192]
+  hop_sizes:  [256, 512, 1024]
+  win_lengths: [2048, 4096, 8192]
+  n_mels: 128
+  w_logmel: 0.5
+
+  # L_AY overall weight (family weights live in `ay:` above)
+  w_ay: 1.0
+
+  # Curriculum boundaries (in global steps)
+  curriculum_inv_end: 3000      # inv ramps 0 -> 1 over [0, 3k]
+  curriculum_equiv_end: 8000    # equiv ramps 0 -> 1 over [3k, 8k]
+  curriculum_comm_end: 15000    # comm ramps 0 -> 1 over [8k, 15k]
+
+  # Init from Stage 1 checkpoint — override from CLI with --init_ckpt
+  init_ckpt: ./runs/stage1_variant_b_codec/ckpt_best.pt
+
+  log_every: 50
+  val_every: 1000
+  ckpt_every: 2000
+  media_every: 1000
+  out_dir: ./runs/stage2_variant_b_codec
+  keep_last: 3
+
+  wandb_project: shayi-stage2
+  wandb_run_name: stage2-B_codec-dac44k-seed0
+  wandb_entity: null
+  wandb_mode: online
+
+  device: cuda
+  amp: true

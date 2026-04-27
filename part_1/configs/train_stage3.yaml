@@ -1,0 +1,115 @@
+seed: 0
+
+data:
+  train_list: data/mini_dataset/train.txt
+  val_list: data/mini_dataset/val.txt
+  roots:
+    - data/processed/slakh
+    - data/processed/moisesdb
+    - data/processed/musdb7s
+  sample_rate: 44100
+  crop_seconds: 10.0
+  feat_hop: 512
+  latent_hop: 512
+  n_pitch_bins: 588
+  n_mels: 128
+  n_mfcc: 20
+  pitch_feat_name: pitch_salience_instru_nondrum.npy
+  rhythm_feat_name: rhythm_instru.npy
+  timbre_feat_name: mfcc_instru.npy
+  spec_feat_name: spec_instru.npy
+  mel_linear_feat_name: mel_linear_instru.npy
+  normalize_audio: true
+
+# The AE architecture MUST match the Stage 2 checkpoint being loaded.
+ae:
+  variant: B_CODEC
+  codec_backend: dac
+  codec_model: dac_44khz
+  codec_sample_rate: 44100
+  codec_dim: 0
+  freeze_codec: true
+  in_channels: 1
+  codec_ratios: [8, 8, 8]
+  codec_n_filters: 32
+  codec_n_residual_layers: 3
+  smoke_codec_dim: 256
+  aux_pitch_dim: 588
+  aux_rhythm_dim: 1
+  aux_timbre_dim: 20
+  adapter_out_dim: 64
+  adapter_type: concat
+  aux_zero_mask: []
+  pitch_latent_dim: 256
+  rhythm_latent_dim: 128
+  timbre_latent_dim: 256
+  fusion_hidden_dim: 512
+  use_vae: true
+
+ayi:
+  feature_dim: 7
+  hidden_dim: 256
+  n_layers: 3
+  activation: gelu
+  zero_init_last: true
+
+train:
+  batch_size: 8
+  num_workers: 4
+
+  # Optimization — MLP is small, can use higher LR than the big AE
+  lr: 1.0e-3
+  betas: [0.9, 0.999]
+  weight_decay: 1.0e-5
+  grad_clip: 1.0
+  warmup_steps: 500
+  max_steps: 20000
+
+  # Transform ranges (must match Stage 2)
+  pitch_min_st: -4.0
+  pitch_max_st:  4.0
+  rhythm_min_scale: 0.9
+  rhythm_max_scale: 1.1111
+  timbre_min_tilt_db: -6.0
+  timbre_max_tilt_db:  6.0
+  
+  transform_backend: feature
+  aux_sync_policy: closed_form
+  pitch_bins_per_semitone: 7
+  feature_fps: 86.1328125
+  vibrato_min_amount: 0.5
+  vibrato_max_amount: 2.0
+  vibrato_lfo_hz: 5.0
+  rhythm_shift_min_steps: -16
+  rhythm_shift_max_steps: 16
+  timbre_high_cut_min_hz: 3000.0
+  timbre_high_cut_max_hz: 12000.0
+  timbre_formant_min_scale: 0.85
+  timbre_formant_max_scale: 1.15
+  mel_fmin_hz: 0.0
+  mel_fmax_hz: 22050.0
+  pitch_probe_op: pitch_shift
+  rhythm_probe_op: rhythm_stretch
+  timbre_probe_op: timbre_eq_tilt
+
+  # Per-factor loss weights
+  w_pitch: 1.0
+  w_rhythm: 1.0
+  w_timbre: 1.0
+
+  # Init from Stage 2 checkpoint — override with --encoder_ckpt
+  encoder_ckpt: ./runs/stage2_variant_b_codec/ckpt_best.pt
+
+  log_every: 50
+  val_every: 1000
+  ckpt_every: 2000
+  out_dir: ./runs/stage3_variant_b_codec
+  keep_last: 3
+
+  wandb_project: shayi-stage3
+  wandb_run_name: stage3-probe-B_codec-dac44k-seed0
+  wandb_entity: null
+  wandb_mode: online
+
+  device: cuda
+  amp: true
