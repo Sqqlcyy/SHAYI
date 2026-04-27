@@ -60,10 +60,10 @@ graph TD
 Experience surgical music editing without any instruction fine-tuning or paired editing datasets.
 
 ### 1. Installation
-git clone https://github.com/YourOrg/SHAYI.git
-cd SHAYI
-conda create -n shayi python=3.12
-conda activate shayi
+git clone https://github.com/Sqqlcyy/SHAYI.git
+cd SHAYI/
+conda create -n shayi python=3.12/
+conda activate shayi/
 pip install -r part_1/requirements.txt
 pip install -r part_2/requirements.txt
 
